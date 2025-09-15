@@ -1,0 +1,1406 @@
+---
+title: "Retroactive Exceptions"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+library(knitr)
+opts_chunk$set(comment = NA, prompt = FALSE, cache = FALSE, echo = TRUE,
+                      results = "asis")
+
+library(tidyverse)
+library(haven)
+library(rmdformats)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(gtsummary)
+library(cowplot)
+library(survival)
+library(survminer)
+library(ggsurvfit)
+library(cmprsk)
+library(tidycmprsk)
+
+```
+
+```{r load data}
+
+  cand_thor = read_sas("Downloads/cand_thor2024.sas7bdat") %>%  
+    zap_formats() %>% zap_labels()
+  
+  just_form_hr = read_sas("Downloads/JustFormHR.sas7bdat") %>%  
+    zap_formats() %>% zap_labels()
+  
+  just_form_hr_data_link = read_sas("C:/Users/danielahn/Downloads/JustFormHRDataLink.sas7bdat") %>%  
+    zap_formats() %>% zap_labels()
+  
+  just_form_hr_stat1 =  read_sas("C:/Users/danielahn/Downloads/JustFormHRStat1.sas7bdat") %>%  
+    zap_formats() %>% zap_labels()
+
+  just_form_hr_stat2 =  read_sas("C:/Users/danielahn/Downloads/JustFormHRStat2.sas7bdat") %>%  
+    zap_formats() %>% zap_labels()
+  
+  just_form_hr_stat4 =  read_sas("C:/Users/danielahn/Downloads/JustFormHRStat4.sas7bdat") %>%  
+    zap_formats() %>% zap_labels()
+  
+  risk_strat_data_hr =  read_sas("C:/Users/danielahn/Downloads/RiskStratDataHR.sas7bdat") %>%  
+    zap_formats() %>% zap_labels()
+  
+  thor_support_device =  read_sas("C:/Users/danielahn/Downloads/ThorSupportDevice.sas7bdat") %>%  
+    zap_formats() %>% zap_labels()
+
+
+```
+
+```{r}
+#Kenley change
+#Added this--confused--otherwise these tables don't seem to exist
+JustFormHRDataLink = read_sas("Downloads/HRstatjust2403 2/JustFormHRDataLink.sas7bdat", NULL)
+
+JustFormHR = read_sas("Downloads/HRstatjust2403 2/JustFormHR.sas7bdat", NULL) 
+
+RiskStratDataHR = read_sas("Downloads/HRstatjust2403 2/RiskStratDataHR.sas7bdat", NULL) 
+
+JustFormHRStat1 = read_sas("Downloads/HRstatjust2403 2/JustFormHRStat1.sas7bdat", NULL) 
+
+JustFormHRStat2 = read_sas("Downloads/HRstatjust2403 2/JustFormHRStat2.sas7bdat", NULL) 
+
+JustFormHRStat4 = read_sas("Downloads/HRstatjust2403 2/JustFormHRStat4.sas7bdat", NULL)
+
+ThorSupportDevice = read_sas("Downloads/HRstatjust2403 2/ThorSupportDevice.sas7bdat", NULL) 
+
+stathist_thor24 = read_sas("Downloads/stathist_thor24.sas7bdat", NULL) 
+
+cand_thor24 = read_sas("Downloads/cand_thor24.sas7bdat", NULL) 
+
+```
+
+# Link data sets
+
+```{r link data sets}
+
+just_form_hr_data_link = JustFormHRDataLink
+just_form_hr = JustFormHR
+
+risk_strat_data_hr = RiskStratDataHR %>% 
+  mutate(ChangeDt = floor_date(ChangeDate, unit = "day")) %>%
+  select(-ChangeDate) %>% 
+  full_join(just_form_hr_data_link %>%
+              dplyr::select(-ChangeDate, -InitialFormJustId), by = "WlregAuditId") %>% 
+  mutate(PX_ID = px_id) %>% 
+  dplyr::select(-px_id) %>%
+  
+  # removes entries that have valid WlregAuditId but missing JustId
+  filter(!is.na(JustId)) %>%
+  
+  # there are instances in which two just. forms were submitted on the same day for a
+  # single PX_ID. The time step in this process is one day, so these are removed
+  group_by(PX_ID, ChangeDt) %>% slice_max(JustId) %>% 
+  ungroup() %>% 
+  
+  dplyr::select(-RiskStratId, -WlregAuditId, -ChangeUserId, -ChangeRequestorId) %>% 
+  select(-(ends_with("St"))) %>% 
+  select(-(starts_with("CandHist"))) %>%
+  select(-(starts_with("SenData"))) %>%
+  select(-(ends_with("Type"))) %>%
+  select(-(ends_with("Perf"))) %>%
+  select(-(starts_with("CPT"))) %>%
+  relocate(ChangeDt:PX_ID)
+
+
+# right_join to filter out erroneous forms, as above
+just_form_hr_data_link = just_form_hr_data_link %>%
+  select(-ChangeDate) %>% 
+  right_join(risk_strat_data_hr %>% 
+              select(ChangeDt, JustId, PX_ID), by = "JustId")
+
+# right_join to filter out erroneous forms, as above
+just_form_hr = just_form_hr %>% 
+  select(JustId, RequestedCandStatCd, RequestedCandStat_descrip, ExtensionNumber, Exception, ThorSupportDevicePrimary, ThorSupportDeviceSecondary, descrip, FormEffectiveDt, FormExpirationDt, FormReceiptDt, FormStatus_descrip, ApplicationStatus_descrip, ChangeDate) %>%
+  mutate(ChangeDt = floor_date(ChangeDate, unit = "day")) %>%
+  mutate(listing_description = descrip) %>% 
+  select(-descrip) %>% 
+  right_join(just_form_hr_data_link %>% 
+              select(-WlregAuditId, -InitialFormJustId), by = "JustId")
+
+
+  # status_just_episode provides same info as stathist_thor, so not including it
+  # # join status episode information by JustId
+  # full_join(status_just_episode %>% select(JustId:EndDate), by = "JustId")
+
+# thor_support_device seems to include many duplicates, include at your own risk
+
+just_form_hr_stat1 = JustFormHRStat1 %>% 
+  select(-ChangeDate) %>%
+  left_join(just_form_hr_data_link %>% 
+              select(JustId, PX_ID, ChangeDt), by = "JustId")
+
+just_form_hr_stat2 = JustFormHRStat2 %>% 
+  select(-ChangeDate) %>%
+  left_join(just_form_hr_data_link %>% 
+              select(JustId, PX_ID, ChangeDt), by = "JustId")
+
+just_form_hr_stat3 = JustFormHRStat3 %>% 
+  select(-ChangeDate) %>%
+  left_join(just_form_hr_data_link %>% 
+              select(JustId, PX_ID, ChangeDt), by = "JustId")
+
+just_form_hr_stat4 = JustFormHRStat4 %>% 
+  select(-ChangeDate) %>%
+  left_join(just_form_hr_data_link %>% 
+              select(JustId, PX_ID, ChangeDt), by = "JustId")
+
+```
+
+# Select relevant cand thor variables
+
+``` {r random}
+
+# cand_variables = cand_thor24 %>% select(PERS_ID, PX_ID, REC_TX_DT, CAN_REM_DT, CAN_REM_CD, CAN_DEATH_DT, PERS_OPTN_DEATH_DT, PERS_SSA_DEATH_DT, CAN_DEATH_DT, CAN_LISTING_CTR_CD, WL_ORG, CAN_LISTING_DT, CAN_AGE_IN_MONTHS_AT_LISTING) %>%
+#   mutate(death_date = pmin(PERS_OPTN_DEATH_DT, PERS_SSA_DEATH_DT, CAN_DEATH_DT, na.rm = TRUE))
+# 
+# #This filters just exceptions, and we are only looking at initial requests. Therefore, this does not include any appeals.
+# cand_list = cand_variables %>% 
+#   filter(CAN_LISTING_DT >= mdy("10-18-2018") & CAN_LISTING_DT <= mdy("12-31-2023")) %>% filter(CAN_AGE_IN_MONTHS_AT_LISTING / 12 >= 18) %>%
+#   left_join(just_form_hr, by = "PX_ID") %>% group_by(PX_ID) %>% arrange(FormEffectiveDt) %>%
+#   filter(FormStatus_descrip == "Approved" | FormStatus_descrip == "Not Approved" | FormStatus_descrip == "Completed") %>% 
+#   filter(Exception == 1) %>%
+#   #filter(grepl("Initial", listing_description, ignore.case = TRUE)) %>% 
+#   filter(grepl("Initial Request", ApplicationStatus_descrip, ignore.case = TRUE)) 
+# 
+
+
+```
+
+
+```{r general plots regarding per center and per region approval and submission of exceptions}
+
+
+cand_variables = cand_thor24 %>% select(PERS_ID, PX_ID, REC_TX_DT, CAN_REM_DT, CAN_REM_CD, CAN_DEATH_DT, PERS_OPTN_DEATH_DT, PERS_SSA_DEATH_DT, CAN_DEATH_DT, CAN_LISTING_CTR_CD, WL_ORG, CAN_LISTING_DT, CAN_AGE_IN_MONTHS_AT_LISTING) %>%
+  mutate(death_date = pmin(PERS_OPTN_DEATH_DT, PERS_SSA_DEATH_DT, CAN_DEATH_DT, na.rm = TRUE))
+
+institution <- institution2025q2 %>% rename(CAN_LISTING_CTR_CD = CTR_CD)
+
+cand_list = cand_variables %>% 
+  filter(CAN_LISTING_DT >= mdy("10-18-2018") & CAN_LISTING_DT <= mdy("12-31-2023")) %>% filter(CAN_AGE_IN_MONTHS_AT_LISTING / 12 >= 18) %>%
+  left_join(just_form_hr, by = "PX_ID") %>% group_by(PX_ID) %>% arrange(FormEffectiveDt) %>%
+  filter(FormStatus_descrip == "Approved" | FormStatus_descrip == "Not Approved") %>% 
+  filter(Exception == 1) %>%
+  #filter(grepl("Initial", listing_description, ignore.case = TRUE)) %>% 
+  filter(grepl("Initial Request", ApplicationStatus_descrip, ignore.case = TRUE)) %>%
+  left_join(institution %>% select(CAN_LISTING_CTR_CD, REGION), by = "CAN_LISTING_CTR_CD") %>% 
+  group_by(JustId) %>% slice(n()) %>% ungroup()
+
+#Filter just the exception requests that actually have a decision made by the RRB
+cand_list$FormStatus_descrip <- factor(cand_list$FormStatus_descrip,
+                                levels = c("Not Approved", "Approved"))
+
+#plot looking at number of candidates with approved exceptions, by region
+plot1 <- ggplot(cand_list, aes(x = factor(REGION), fill = FormStatus_descrip)) +
+  geom_bar(position = "stack") +
+  labs(title = "Absolute Number of Candidates with Approved Exceptions, by Region",
+       x = "UNOS Region",
+       y = "Number of Candidates",
+       fill = "Exception Status") +
+  theme_classic() +
+  theme(plot.title = element_text(size = 18),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+
+total_cand = cand_variables %>% 
+  filter(CAN_LISTING_DT >= mdy("10-18-2018") & CAN_LISTING_DT <= mdy("12-31-2023")) %>% filter(CAN_AGE_IN_MONTHS_AT_LISTING / 12 >= 18) %>%
+  left_join(institution %>% select(CAN_LISTING_CTR_CD, REGION), by = "CAN_LISTING_CTR_CD") %>% 
+  group_by(PX_ID) %>% slice(n()) %>% ungroup() %>% left_join(fortable1 %>% select(PX_ID, FormStatus_descrip)) %>% 
+  mutate(exception_application = ifelse(!is.na(FormStatus_descrip), "Applied for Exception", "Standard Criteria Listing"))
+
+number <- total_cand %>% group_by(CAN_LISTING_CTR_CD) %>%
+  summarise(n = n())
+
+total_cand <- total_cand %>% left_join(number) %>% ungroup() %>% group_by(CAN_LISTING_CTR_CD) %>% arrange(n, CAN_LISTING_CTR_CD)
+  
+groups = total_cand$CAN_LISTING_CTR_CD %>% unique
+i = 0
+total_cand$center = NA
+for (g in groups) {
+  i = i + 1
+  total_cand[total_cand$CAN_LISTING_CTR_CD == g, ]$center = i
+}
+
+rates <- total_cand %>% ungroup() %>% group_by(CAN_LISTING_CTR_CD) %>%
+  summarize(
+    prop_applied_exceptions = sum(exception_application == "Applied for Exception") / n(),
+    number_exceptions = sum(exception_application == "Applied for Exception"),
+    prop_exceptions_whole = sum(exception_application == "Applied for Exception") / 8581) %>%
+  arrange(-number_exceptions) %>%
+  mutate(Cum = cumsum(number_exceptions)) %>%
+  mutate(CumProp = cumsum(prop_exceptions_whole))
+
+
+median(rates$prop_applied_exceptions)
+
+#Plots the per-center distribution of candidates, stratified by durable LVAD implantation rate
+
+total_cand$exception_application <- factor(total_cand$exception_application,
+                                           levels = c("Standard Criteria Listing", "Applied for Exception"))
+
+#this plot looks at distribution of candidates who have applied for an exception, stratified by center
+centerplot <- ggplot(total_cand, aes(x = center, fill = exception_application)) +
+  geom_bar(position = "stack", stat = "count", width = 0.8) +
+  theme_classic() +
+  theme(legend.position = "bottom") + 
+  theme(axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20)) +
+  labs(x = "U.S. Transplant Centers", y = "Number of Candidates") +
+  scale_x_continuous(n.breaks = 7) +
+  scale_fill_manual(name = "", values = c("#b8a370", "#660000", "#ae6320", "#C3C1C1")) + 
+  guides(fill = guide_legend(nrow = 2, byrow=TRUE))
+
+
+#set up a chi-square test to see per-center differences
+by_center_data <- cand_list %>%
+  group_by(CAN_LISTING_CTR_CD) %>%
+  summarise(total_patients = n(),
+            approved_patients = sum(FormStatus_descrip == "Approved"),
+            not_approved_patients = sum(FormStatus_descrip == "Not Approved")) %>%
+  mutate(percentage_approved = (approved_patients / total_patients) * 100)
+
+by_center_data %>% select(approved_patients, not_approved_patients) %>% chisq.test()
+
+
+
+
+approved_data <- cand_list %>%
+  group_by(REGION) %>%
+  summarise(total_patients = n(),
+            approved_patients = sum(FormStatus_descrip == "Approved"),
+            not_approved_patients = sum(FormStatus_descrip == "Not Approved")) %>%
+  mutate(percentage_approved = (approved_patients / total_patients) * 100)
+
+# Create the barplot
+plot2 <- ggplot(approved_data, aes(x = factor(REGION), y = percentage_approved)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Percentage of Approved Patients by REGION",
+       x = "UNOS Region",
+       y = "Percentage Approved") +
+  theme_classic() +
+  theme(plot.title = element_text(size = 18),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+approved_data %>% select(approved_patients, not_approved_patients) %>% chisq.test()
+
+```
+
+           
+    
+  
+  
+``` {r exception times}
+
+#This looks at the time that it takes from patients submitting the exceptions to the RRBs actually receiving the application forms.
+cand_variables = cand_thor24 %>% select(PERS_ID, PX_ID, REC_TX_DT, CAN_REM_DT, CAN_REM_CD, CAN_DEATH_DT, PERS_OPTN_DEATH_DT, PERS_SSA_DEATH_DT, CAN_DEATH_DT, CAN_LISTING_CTR_CD, WL_ORG, CAN_LISTING_DT, CAN_AGE_IN_MONTHS_AT_LISTING) %>%
+  mutate(death_date = pmin(PERS_OPTN_DEATH_DT, PERS_SSA_DEATH_DT, CAN_DEATH_DT, na.rm = TRUE))
+
+institution <- institution2025q2 %>% rename(CAN_LISTING_CTR_CD = CTR_CD)
+
+cand_list_status1 = cand_variables %>% 
+  filter(CAN_LISTING_DT >= mdy("10-18-2018") & CAN_LISTING_DT <= mdy("12-31-2023")) %>% filter(CAN_AGE_IN_MONTHS_AT_LISTING / 12 >= 18) %>%
+  left_join(just_form_hr, by = "PX_ID") %>% group_by(PX_ID) %>% arrange(FormEffectiveDt) %>%
+  filter(FormStatus_descrip == "Approved" | FormStatus_descrip == "Not Approved") %>% 
+  filter(Exception == 1) %>% filter(grepl("Status 1", listing_description, ignore.case = TRUE)) %>%
+  filter(grepl("Initial", ApplicationStatus_descrip, ignore.case = TRUE)) %>%
+  left_join(institution %>% select(CAN_LISTING_CTR_CD, REGION), by = "CAN_LISTING_CTR_CD") %>%
+  group_by(JustId) %>% slice(n()) %>% ungroup() %>%
+  mutate(
+    time_from_status_to_review = as.numeric(difftime(FormReceiptDt, FormEffectiveDt, units = "days")))
+
+cand_list_status2 = cand_variables %>% 
+  filter(CAN_LISTING_DT >= mdy("10-18-2018") & CAN_LISTING_DT <= mdy("12-31-2023")) %>% filter(CAN_AGE_IN_MONTHS_AT_LISTING / 12 >= 18) %>%
+  left_join(just_form_hr, by = "PX_ID") %>% group_by(PX_ID) %>% arrange(FormEffectiveDt) %>%
+  filter(FormStatus_descrip == "Approved" | FormStatus_descrip == "Not Approved") %>% 
+  filter(Exception == 1) %>% filter(grepl("Status 2", listing_description, ignore.case = TRUE)) %>%
+  filter(grepl("Initial", ApplicationStatus_descrip, ignore.case = TRUE)) %>%
+  left_join(institution %>% select(CAN_LISTING_CTR_CD, REGION), by = "CAN_LISTING_CTR_CD") %>%
+  group_by(JustId) %>% slice(n()) %>% ungroup() %>%
+  mutate(
+    time_from_status_to_review = as.numeric(difftime(FormReceiptDt, FormEffectiveDt, units = "days")))
+
+cand_list_status3 = cand_variables %>% 
+  filter(CAN_LISTING_DT >= mdy("10-18-2018") & CAN_LISTING_DT <= mdy("12-31-2023")) %>% filter(CAN_AGE_IN_MONTHS_AT_LISTING / 12 >= 18) %>%
+  left_join(just_form_hr, by = "PX_ID") %>% group_by(PX_ID) %>% arrange(FormEffectiveDt) %>%
+  filter(FormStatus_descrip == "Approved" | FormStatus_descrip == "Not Approved") %>% 
+  filter(Exception == 1) %>% filter(grepl("Status 3", listing_description, ignore.case = TRUE)) %>%
+  filter(grepl("Initial", ApplicationStatus_descrip, ignore.case = TRUE)) %>%
+  left_join(institution %>% select(CAN_LISTING_CTR_CD, REGION), by = "CAN_LISTING_CTR_CD") %>%
+  group_by(JustId) %>% slice(n()) %>% ungroup() %>%
+  mutate(
+    time_from_status_to_review = as.numeric(difftime(FormReceiptDt, FormEffectiveDt, units = "days")))
+
+cand_list_status4 = cand_variables %>% 
+  filter(CAN_LISTING_DT >= mdy("10-18-2018") & CAN_LISTING_DT <= mdy("12-31-2023")) %>% filter(CAN_AGE_IN_MONTHS_AT_LISTING / 12 >= 18) %>%
+  left_join(just_form_hr, by = "PX_ID") %>% group_by(PX_ID) %>% arrange(FormEffectiveDt) %>%
+  filter(FormStatus_descrip == "Approved" | FormStatus_descrip == "Not Approved") %>% 
+  filter(Exception == 1) %>% filter(grepl("Status 4", listing_description, ignore.case = TRUE)) %>%
+  filter(grepl("Initial", ApplicationStatus_descrip, ignore.case = TRUE)) %>%
+  left_join(institution %>% select(CAN_LISTING_CTR_CD, REGION), by = "CAN_LISTING_CTR_CD") %>%
+  group_by(JustId) %>% slice(n()) %>% ungroup() %>%
+  mutate(
+    time_from_status_to_review = as.numeric(difftime(FormReceiptDt, FormEffectiveDt, units = "days")))
+
+cand_list_all_statuses <- rbind(cand_list_status1, cand_list_status2, cand_list_status3, cand_list_status4) %>% 
+  select(PX_ID, listing_description, time_from_status_to_review, REGION) %>%
+  mutate(
+    initial_status = case_when(
+      grepl("Status 1", listing_description, ignore.case = TRUE) ~ "Status 1",
+      grepl("Status 2", listing_description, ignore.case = TRUE) ~ "Status 2",
+      grepl("Status 3", listing_description, ignore.case = TRUE) ~ "Status 3",
+      grepl("Status 4", listing_description, ignore.case = TRUE) ~ "Status 4"))
+
+
+median_values <- aggregate(time_from_status_to_review ~ initial_status, cand_list_all_statuses, median)
+
+# Create a barplot of the median amount of time that it takes for exception applications 
+plot_times <- ggplot(median_values, aes(x = initial_status, y = time_from_status_to_review)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Median Time from Status to Review by Initial Status",
+       x = "Initial Status Achieved with Exception",
+       y = "Median Time from Status to\nReview by Regional Review Board") +
+  ylim(0, 12) +
+  theme_classic() +
+  theme(plot.title = element_text(size = 18),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+  
+  
+median_data <- cand_list_all_statuses %>%
+  group_by(initial_status, REGION) %>%
+  summarize(median_time = median(time_from_status_to_review, na.rm = TRUE))
+
+status1 <- cand_list_all_statuses %>% filter(initial_status == "Status 1")
+kruskal.test(time_from_status_to_review ~ REGION, data = status1)
+
+status2 <- cand_list_all_statuses %>% filter(initial_status == "Status 2")
+kruskal.test(time_from_status_to_review ~ REGION, data = status2)
+
+status3 <- cand_list_all_statuses %>% filter(initial_status == "Status 3")
+kruskal.test(time_from_status_to_review ~ REGION, data = status3)
+
+status4 <- cand_list_all_statuses %>% filter(initial_status == "Status 4")
+kruskal.test(time_from_status_to_review ~ REGION, data = status4)
+
+custom_colors <- c("#660000", "#ae6320", "#b8a370", "#C3C1C1") 
+# Create a barplot of the median amount of time that it takes for exception applications to be received by the RRBs, stratified by region and status
+exception_time_plot <- ggplot(median_data, aes(x = factor(REGION), y = median_time, fill = initial_status), color = "black") +
+  geom_bar(stat = "identity", position = "dodge", colour = "black") +
+  labs(x = "Region", 
+       y = "Median Time in Days from Submission to\nForm Receipt by Regional Review Board", 
+       title = "",
+       fill = "Listing with Exception") +
+  theme_classic() +
+  scale_fill_manual(values = custom_colors) +
+  theme(plot.title = element_text(size = 18),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+
+
+
+
+write.csv(cand_list_all_statuses, "all_statuses.csv")
+
+
+
+```
+
+
+``` {r not approved}
+
+#This code chunk isolates all candidates who have submitted at least one exception application that was denied 
+
+cand_variables = cand_thor24 %>% select(PERS_ID, PX_ID, REC_TX_DT, CAN_REM_DT, CAN_REM_CD, CAN_LAST_ACT_STAT_DT, CAN_LAST_INACT_STAT_DT,
+                                        CAN_DEATH_DT, PERS_OPTN_DEATH_DT, PERS_SSA_DEATH_DT, CAN_DEATH_DT, CAN_LISTING_CTR_CD, WL_ORG, 
+                                        CAN_LISTING_DT, CAN_AGE_IN_MONTHS_AT_LISTING) %>%
+  mutate(death_date = pmin(PERS_OPTN_DEATH_DT, PERS_SSA_DEATH_DT, CAN_DEATH_DT, na.rm = TRUE),
+         last_date = pmax(CAN_LAST_ACT_STAT_DT, CAN_LAST_INACT_STAT_DT, na.rm = TRUE))
+
+notapproved1 = cand_variables %>% 
+  filter(CAN_LISTING_DT >= mdy("10-18-2018") & CAN_LISTING_DT <= mdy("12-31-2023")) %>% filter(CAN_AGE_IN_MONTHS_AT_LISTING / 12 >= 18) %>%
+  left_join(just_form_hr, by = "PX_ID") %>% group_by(PX_ID) %>% arrange(FormEffectiveDt) %>%
+  filter(FormStatus_descrip == "Approved" | FormStatus_descrip == "Not Approved") %>% 
+  filter(Exception == 1) %>% filter(any(FormStatus_descrip == "Not Approved")) %>% select(PX_ID, REC_TX_DT, CAN_REM_DT, death_date, last_date, CAN_REM_CD, FormEffectiveDt, FormExpirationDt, FormReceiptDt, FormStatus_descrip, ApplicationStatus_descrip, listing_description) %>%
+  filter(all(grepl("Initial Request", ApplicationStatus_descrip, ignore.case = TRUE))) %>% filter(FormStatus_descrip == "Not Approved")
+
+notapproved2 = cand_variables %>% 
+  filter(CAN_LISTING_DT >= mdy("10-18-2018") & CAN_LISTING_DT <= mdy("12-31-2023")) %>% filter(CAN_AGE_IN_MONTHS_AT_LISTING / 12 >= 18) %>%
+  left_join(just_form_hr, by = "PX_ID") %>% group_by(PX_ID) %>% arrange(FormEffectiveDt) %>%
+  filter(FormStatus_descrip == "Approved" | FormStatus_descrip == "Not Approved") %>% 
+  filter(Exception == 1) %>% filter(any(FormStatus_descrip == "Not Approved")) %>% select(PX_ID, REC_TX_DT, CAN_REM_DT, death_date, last_date, CAN_REM_CD, FormEffectiveDt, FormExpirationDt, FormReceiptDt, FormStatus_descrip, ApplicationStatus_descrip, listing_description) %>%
+  filter(any(grepl("Appeal", ApplicationStatus_descrip, ignore.case = TRUE)) | any(grepl("Refer", ApplicationStatus_descrip, ignore.case = TRUE))) %>%
+  filter(FormStatus_descrip == "Not Approved") %>% filter(n() == 1)
+
+notapproved3 = cand_variables %>% 
+  filter(CAN_LISTING_DT >= mdy("10-18-2018") & CAN_LISTING_DT <= mdy("12-31-2023")) %>% filter(CAN_AGE_IN_MONTHS_AT_LISTING / 12 >= 18) %>%
+  left_join(just_form_hr, by = "PX_ID") %>% group_by(PX_ID) %>% arrange(FormEffectiveDt) %>%
+  filter(FormStatus_descrip == "Approved" | FormStatus_descrip == "Not Approved") %>% 
+  filter(Exception == 1) %>% filter(any(FormStatus_descrip == "Not Approved")) %>% select(PX_ID, REC_TX_DT, CAN_REM_DT, death_date, last_date, CAN_REM_CD, FormEffectiveDt, FormExpirationDt, FormReceiptDt, FormStatus_descrip, ApplicationStatus_descrip, listing_description) %>%
+  filter(any(grepl("Appeal", ApplicationStatus_descrip, ignore.case = TRUE)) | any(grepl("Refer", ApplicationStatus_descrip, ignore.case = TRUE))) %>%
+  filter(FormStatus_descrip == "Not Approved")
+
+notapproved3.1 = notapproved3 %>% filter(n() == 2) %>%
+  group_by(PX_ID) %>%
+  arrange(FormEffectiveDt, .by_group = TRUE) %>%
+  mutate(ConditionMet = ifelse(row_number() == 2 & 
+          (abs(difftime(FormEffectiveDt, lag(FormReceiptDt, n = 1), units = "days")) <= 1 | 
+          !(grepl("Initial", ApplicationStatus_descrip, ignore.case = TRUE))), TRUE, FALSE),
+         ConditionMet = case_when(
+           all(ConditionMet == FALSE) ~ FALSE,
+           TRUE ~ TRUE))
+
+notapproved3.1.1 <- notapproved3.1 %>% filter(ConditionMet == TRUE) %>%
+  mutate(
+    time_from_status_to_receipt = as.numeric(difftime(FormReceiptDt, lag(FormEffectiveDt), units = "days")),
+    FormEffectiveDt = first(FormEffectiveDt)) %>% slice(n())
+
+notapproved3.1.2 <- notapproved3.1 %>% filter(ConditionMet == FALSE) %>% slice(n())
+
+notapproved3.2 = notapproved3 %>% filter(n() > 2) %>%
+  group_by(PX_ID) %>%
+  arrange(FormEffectiveDt, .by_group = TRUE) %>%
+  mutate(
+    ConditionMet = ifelse((abs(difftime(FormEffectiveDt, lag(FormReceiptDt, n = 1), units = "days")) <= 1 | 
+                         !(grepl("Initial", ApplicationStatus_descrip, ignore.case = TRUE))), TRUE, FALSE),
+    ConditionMet = case_when(
+      is.na(ConditionMet) & lead(ConditionMet) == TRUE ~ TRUE,
+      is.na(ConditionMet) & lead(ConditionMet) == FALSE ~ FALSE,
+      TRUE ~ ConditionMet),
+    ConditionMet = ifelse(lead(ConditionMet) == TRUE & ConditionMet == FALSE, TRUE, ConditionMet))
+
+notapproved3.2.1 <- notapproved3.2 %>% filter(all(ConditionMet == TRUE)) %>% arrange(FormEffectiveDt) %>%
+  mutate(time_from_status_to_receipt = as.numeric(difftime(FormReceiptDt, first(FormEffectiveDt), units = "days")),
+         FormEffectiveDt = first(FormEffectiveDt)) %>% slice(n())
+
+notapproved3.2.2 <- notapproved3.2 %>% filter(any(ConditionMet == FALSE)) %>% arrange(FormEffectiveDt) %>%
+  filter(row_number() > 1) %>% 
+  mutate(time_from_status_to_receipt = as.numeric(difftime(FormReceiptDt, first(FormEffectiveDt), units = "days")),
+         FormEffectiveDt = first(FormEffectiveDt)) %>% slice(n())
+      
+notapproved3 <- rbind(notapproved3.1.1, notapproved3.1.2, notapproved3.2.1, notapproved3.2.2) 
+      
+notapproved <- rbind(notapproved1, notapproved2, notapproved3) %>% select(-ConditionMet) %>% ungroup() %>% 
+  group_by(PX_ID) %>% arrange(FormEffectiveDt) %>%
+  mutate(
+    time_from_status_to_receipt = case_when(
+      is.na(time_from_status_to_receipt) ~ as.numeric(difftime(FormReceiptDt, FormEffectiveDt, units = "days")),
+      TRUE ~ time_from_status_to_receipt))
+
+totaltime <- sum(notapproved$time_from_status_to_receipt)
+  
+#this created a dataset of the people who have been denied at least once.
+notapproved_dataset <- notapproved %>% slice(n()) %>% 
+  mutate(tx = ifelse(REC_TX_DT >= FormEffectiveDt & REC_TX_DT <= FormReceiptDt, 1, 0),
+         death_det = case_when(
+           (CAN_REM_CD == 13 & CAN_REM_DT >= FormEffectiveDt & CAN_REM_DT <= FormReceiptDt) | 
+            (death_date >= FormEffectiveDt & death_date <= FormReceiptDt) ~ 1,
+           TRUE ~ 0),
+         receipt = ifelse(death_det == 0 & tx == 0 & CAN_REM_DT >= FormReceiptDt, 1, 0)) %>% 
+  arrange(tx) %>% slice(n()) %>% 
+  mutate(
+    outcome = case_when(
+      death_det == 1 ~ 1,
+      tx == 1 ~ 2,
+      receipt == 1 ~ 3,
+      TRUE ~ 0),
+    time_from_status_to_receipt = case_when(
+      is.na(time_from_status_to_receipt) ~ as.numeric(difftime(FormReceiptDt, FormEffectiveDt, units = "days")),
+      TRUE ~ time_from_status_to_receipt),
+    time_from_status_to_tx = ifelse(tx == 1, as.numeric(difftime(REC_TX_DT, FormEffectiveDt, units = "days")), NA),
+    time_from_status_to_death_det = ifelse(death_det == 1, as.numeric(difftime(CAN_REM_DT, FormEffectiveDt, units = "days")), NA),
+    time_from_status_to_removal = as.numeric(difftime(last_date, FormEffectiveDt, units = "days")),
+    time = case_when(
+      outcome == 1 ~ time_from_status_to_death_det,
+      outcome == 2 ~ time_from_status_to_tx,
+      outcome == 3 ~ time_from_status_to_receipt,
+      TRUE ~ time_from_status_to_removal)) %>%
+  filter(time >= 0)
+
+
+#SENSITIVITY ANALYSIS
+
+
+
+```
+
+``` {r approved}
+
+#this code chunk isolates all candidates who submitted exception applications that were all approved.
+
+cand_variables = cand_thor24 %>% select(PERS_ID, PX_ID, REC_TX_DT, CAN_REM_DT, CAN_REM_CD, CAN_LAST_ACT_STAT_DT, CAN_LAST_INACT_STAT_DT,
+                                        CAN_DEATH_DT, PERS_OPTN_DEATH_DT, PERS_SSA_DEATH_DT, CAN_DEATH_DT, CAN_LISTING_CTR_CD, WL_ORG, 
+                                        CAN_LISTING_DT, CAN_AGE_IN_MONTHS_AT_LISTING) %>%
+  mutate(death_date = pmin(PERS_OPTN_DEATH_DT, PERS_SSA_DEATH_DT, CAN_DEATH_DT, na.rm = TRUE),
+         last_date = pmax(CAN_LAST_ACT_STAT_DT, CAN_LAST_INACT_STAT_DT, na.rm = TRUE))
+
+approved = cand_variables %>% 
+  filter(CAN_LISTING_DT >= mdy("10-18-2018") & CAN_LISTING_DT <= mdy("12-31-2023")) %>% filter(CAN_AGE_IN_MONTHS_AT_LISTING / 12 >= 18) %>%
+  left_join(just_form_hr, by = "PX_ID") %>% group_by(PX_ID) %>% arrange(FormEffectiveDt) %>%
+  filter(FormStatus_descrip == "Approved" | FormStatus_descrip == "Not Approved") %>% 
+  filter(Exception == 1) %>% filter(all(FormStatus_descrip == "Approved")) %>% select(PX_ID, REC_TX_DT, CAN_REM_DT, death_date, last_date, CAN_REM_CD, FormEffectiveDt, FormExpirationDt, FormReceiptDt, FormStatus_descrip, ApplicationStatus_descrip, listing_description) %>%
+  mutate(
+    time_from_status_to_receipt = as.numeric(difftime(FormReceiptDt, FormEffectiveDt, units = "days"))) %>% 
+  filter(!is.na(time_from_status_to_receipt) & time_from_status_to_receipt >= 0) %>%
+  filter(FormEffectiveDt <= CAN_REM_DT)
+
+totaltimeapproved <- sum(approved$time_from_status_to_receipt)
+  
+approved_dataset <- approved %>% slice(n()) %>%
+  mutate(tx = ifelse(REC_TX_DT >= FormEffectiveDt & REC_TX_DT <= FormReceiptDt, 1, 0),
+         death_det = case_when(
+           (CAN_REM_CD == 13 & CAN_REM_DT >= FormEffectiveDt & CAN_REM_DT <= FormReceiptDt) | 
+            (death_date >= FormEffectiveDt & death_date <= FormReceiptDt) ~ 1,
+           TRUE ~ 0),
+         receipt = ifelse(death_det == 0 & tx == 0 & CAN_REM_DT >= FormReceiptDt, 1, 0)) %>% 
+  arrange(tx) %>% slice(n()) %>% 
+  mutate(
+    outcome = case_when(
+      death_det == 1 ~ 1,
+      tx == 1 ~ 2,
+      receipt == 1 ~ 3,
+      TRUE ~ 0),
+    time_from_status_to_receipt = case_when(
+      is.na(time_from_status_to_receipt) ~ as.numeric(difftime(FormReceiptDt, FormEffectiveDt, units = "days")),
+      TRUE ~ time_from_status_to_receipt),
+    time_from_status_to_tx = ifelse(tx == 1, as.numeric(difftime(REC_TX_DT, FormEffectiveDt, units = "days")), NA),
+    time_from_status_to_death_det = ifelse(death_det == 1, as.numeric(difftime(CAN_REM_DT, FormEffectiveDt, units = "days")), NA),
+    time_from_status_to_removal = as.numeric(difftime(last_date, FormEffectiveDt, units = "days")),
+    time = case_when(
+      outcome == 1 ~ time_from_status_to_death_det,
+      outcome == 2 ~ time_from_status_to_tx,
+      outcome == 3 ~ time_from_status_to_receipt,
+      TRUE ~ time_from_status_to_removal))
+
+#SENSITIVITY ANALYSIS
+
+```
+
+``` {r creating cumulative incidence plots}
+
+#combine the two groups (both approved and denied). Here we estimated the cumulative incidence of transplant before form receipt treating death or deterioration and form receipt by RRB as competing events.
+
+total <- rbind(notapproved_dataset, approved_dataset)
+
+total$outcome <- factor(total$outcome,
+                        levels = c("0", "1", "2", "3"), # Assuming 0 is censored, adjust if different
+                        labels = c("Censored", "Death or Deterioration\nBefore Form Receipt", "Transplant Before\nForm Receipt", "Form Receipt by RRB"))
+
+options("ggsurvfit.switch-color-linetype" = TRUE)
+
+custom_colors <- c(
+  `dark red` = "#660000",
+  `bright red` = "#b81d2e",
+  `orange` = "#ae6320",
+  `yellow`= "#b8a370",
+  `green` = "#3ba9a9",
+  `white` = "#FFFFFF",
+  `grey` = "#C3C1C1",
+  `light green` = "#8dd9d7",
+  `light yellow` = "#ddd3bb",
+  `light orange` = "#e49f62",
+  `space sparkle`= "#496061",
+  `violet` = "#7A3DE3",
+  `sandy brown` = "#FA9E4D")
+
+custom_colors <- c("black", "#FA9E4D", "#660000") 
+
+#creates a cumulative incidence plot of death and transplant of patients who are denied and approved. This time is simply the "transit" time before receipt by the RRBs
+cif_plot <- survfit2(Surv(time, outcome) ~ FormStatus_descrip, data = total) %>%
+  ggcuminc(
+    outcome = c("Death or Deterioration\nBefore Form Receipt", "Transplant Before\nForm Receipt", "Form Receipt by RRB"),
+    linewidth = 1) + 
+  add_confidence_interval(alpha = 0.5) +
+  add_risktable(size = 7, theme = theme_risktable_default(plot.title.size = 18, axis.text.y.size = 18)) +
+  coord_cartesian(xlim = c(0, 14)) +
+  scale_x_continuous(breaks = c(0, 2, 4, 6, 8, 10, 12, 14)) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent, 
+    expand = c(0.01, 0)
+  ) +
+  xlab("Days after Submitting Status Exception Application") +
+  theme_classic() +
+  #guides(linetype=guide_legend(nrow = 1, byrow=TRUE)) +
+  #guides(color = guide_legend(nrow = 1, byrow=TRUE)) +
+  scale_color_manual(values = c('#374e55', '#df8f44', '#00a1d5')) +
+  scale_fill_manual(values = c('#374e55', '#df8f44', '#00a1d5')) +
+  guides(linetype = "none") +
+  theme(plot.title = element_text(size = 18),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20)) +
+  annotate("text", x = 0, y = 0.95, hjust = 0, size = 6,
+           label = paste0(
+             "Death/Deterioration p: ", "0.77")) + 
+  annotate("text", x = 0, y = 0.88, hjust = 0, size = 6,
+           label = paste0(
+             "Transplant p: ", "< 0.001")) + 
+  annotate("text", x = 0, y = 0.81, hjust = 0, size = 6,
+           label = paste0(
+             "Form Receipt by RRB p: ", "0.045"))
+
+#linetype = guide_legend(override.aes = list(fill = c(NA, NA)))
+
+
+cifresults <- cuminc(Surv(time, outcome) ~ FormStatus_descrip, data = total)
+
+print(cifresults)
+
+cifresults_receipt <- cuminc(Surv(time, outcome) ~ FormStatus_descrip, data = as.data.frame(total)) %>%
+  tbl_cuminc(
+    times = 14,
+    outcomes = c("Death or Deterioration\nBefore Form Receipt", "Transplant Before\nForm Receipt", "Form Receipt by RRB"),
+    estimate_fun = gtsummary::label_style_number(scale = 100, digits = 1))
+
+#create a table 1
+```
+
+``` {r table1}
+
+#Here we make a table 1 
+
+fortable1 <- total %>% select(PX_ID, FormStatus_descrip, listing_description) %>% left_join(cand_thor24 %>% select(PX_ID, CAN_REM_CD, CAN_INIT_ACT_STAT_CD, CAN_RACE, CAN_ETHNICITY_SRTR, CAN_GENDER, CAN_ABO, CAN_DGN, CAN_AGE_AT_LISTING, CAN_AGE_IN_MONTHS_AT_LISTING, CAN_BMI, CAN_PRIMARY_PAY, CAN_FUNCTN_STAT, CAN_PCW_MEAN, CAN_HGT_CM, CAN_WGT_KG, CAN_CARDIAC_OUTPUT, CAN_LISTING_CTR_CD, CAN_IABP, CAN_ECMO, CAN_IV_INOTROP, CAN_VAD1, CAN_VAD2, CAN_VAD_TY)) %>% left_join(thor_support_device %>% select(PX_ID, OtherSpecify)) %>% group_by(PX_ID) %>%
+  mutate(
+    sex = ifelse(CAN_GENDER == "M", "Male", "Female"),
+    sex = factor(sex, levels = c("Male", "Female")),
+    bmi = case_when(
+      CAN_BMI < 18 ~ "Underweight",
+      CAN_BMI >= 18 & CAN_BMI < 25 ~ "Normal",
+      CAN_BMI >= 25 & CAN_BMI < 30 ~ "Overweight",
+      CAN_BMI >= 30 ~ "Obese",
+      TRUE ~ "Unknown"),
+    bmi = factor(bmi, levels = c("Normal", "Underweight", "Overweight", "Obese", "Unknown")),
+    requested_status = case_when(
+      grepl("Status 1", listing_description) ~ "Status 1",
+      grepl("Status 2", listing_description) ~ "Status 2",
+      grepl("Status 3", listing_description) ~ "Status 3",
+      grepl("Status 4", listing_description) ~ "Status 4"),
+    requested_status = factor(requested_status, levels = c("Status 1", "Status 2", "Status 3", "Status 4")),
+    race = case_when(
+      is.na(CAN_RACE) & CAN_ETHNICITY_SRTR == "LATINO" ~ "Hispanic/Latino",
+      CAN_RACE == 8 & CAN_ETHNICITY_SRTR == "NLATIN" ~ "White",
+      CAN_RACE == 16 & CAN_ETHNICITY_SRTR == "NLATIN" ~ "Black",
+      CAN_RACE == 64 & CAN_ETHNICITY_SRTR == "NLATIN" ~ "Asian",
+      TRUE ~ "Other"),
+      race = factor(race, levels = c("White", "Black", "Hispanic/Latino", "Asian", "Other")),
+         #Kenley changes--may not want to use approximation of 30.44 days in a month--there are different ways to do this.
+         #age_at_listing = CAN_AGE_AT_LISTING,
+         #age_at_mcs = floor(CAN_AGE_AT_LISTING + time_from_listing_to_mcs / 365.25),
+      age_at_listing = floor(CAN_AGE_IN_MONTHS_AT_LISTING/12),
+      functional = case_when(
+        (CAN_FUNCTN_STAT == 2010 | CAN_FUNCTN_STAT == 2020 | CAN_FUNCTN_STAT == 2030 | CAN_FUNCTN_STAT == 2040) ~ "Low",
+        (CAN_FUNCTN_STAT == 2050 | CAN_FUNCTN_STAT == 2060 | CAN_FUNCTN_STAT == 2070) ~ "Intermediate",
+        (CAN_FUNCTN_STAT == 2080 | CAN_FUNCTN_STAT == 2090 | CAN_FUNCTN_STAT == 2100) ~ "High",
+        TRUE ~ "Unknown"),
+    functional = factor(functional, levels = c("High", "Intermediate", "Low", "Unknown")),
+    payor = case_when(
+      CAN_PRIMARY_PAY %in% c(2, 3, 4, 5, 6, 7, 13) ~ "Public",
+      CAN_PRIMARY_PAY == 1 ~ "Private",
+      TRUE ~ "Other"),
+    blood_type = factor(
+      case_when(
+        CAN_ABO %in% c("A", "A1", "A2") ~ "A",
+        CAN_ABO %in% c("A1B", "A2B") ~ "AB",
+        TRUE ~ CAN_ABO)),
+    payor = factor(payor, levels = c("Private", "Public", "Other")),
+    diagnosis = case_when(
+      CAN_DGN > 999 & CAN_DGN < 1007 ~ "Dilated Cardiomyopathy, Non-Ischemic",
+      CAN_DGN == 1007 | CAN_DGN == 1200 ~ "Ischemic Cardiomyopathy",
+      CAN_DGN > 1048 & CAN_DGN < 1100 ~ "Restrictive Cardiomyopathy",
+      CAN_DGN == 1203 | (CAN_DGN >= 1205 & CAN_DGN <= 1207) ~ "Congenital Heart Disease",
+      CAN_DGN == 1201 ~ "Hypertrophic Cardiomyopathy",
+      TRUE ~ "Other"),
+    diagnosis = factor(diagnosis, levels = c("Dilated Cardiomyopathy, Non-Ischemic", "Ischemic Cardiomyopathy", 
+                                             "Restrictive Cardiomyopathy", "Hypertrophic Cardiomyopathy", "Congenital Heart Disease", "Other")),
+    pcwp = CAN_PCW_MEAN,
+    body_surface_area = 0.007184 * (CAN_HGT_CM)^(0.725) * CAN_WGT_KG^(0.425),
+    cardiac_index = as.numeric(CAN_CARDIAC_OUTPUT/body_surface_area),
+    cardiac_index = ifelse(cardiac_index > 10, NA, cardiac_index),
+    inotrope = ifelse(is.na(CAN_IV_INOTROP), 0, CAN_IV_INOTROP),
+    MCS = case_when(
+      any(grepl("impella", OtherSpecify, ignore.case = TRUE)) | CAN_VAD1 %in% c(215, 225, 226, 237, 311, 317, 318, 331, 332) ~ "PEVAD",
+      CAN_ECMO == 1 | any(OtherSpecify == "Cardiohelp") ~ "ECMO",
+      CAN_IABP == 1 ~ "IABP",
+      TRUE ~ "Other"),
+    MCS = case_when(
+      MCS == "Other" & CAN_VAD_TY == 4 ~ "TAH",
+      MCS == "Other" & CAN_VAD_TY == 5 ~ "LVAD and RVAD",
+      MCS == "Other" & CAN_VAD_TY == 2 ~ "LVAD Only",
+      MCS == "Other" & CAN_VAD_TY == 3 ~ "RVAD Only",
+      TRUE ~ MCS),
+    MCS = ifelse(MCS == "Other", NA, MCS),
+    MCS = factor(MCS, levels = c("ECMO", "TAH", "IABP", "LVAD and RVAD", "LVAD Only", "RVAD Only"))) %>% slice(1)
+
+var_label_list <- list(age_at_listing = "Age at Listing (Years)",
+                       pcwp = "Pulmonary Capillary Wedge Pressure",
+                       cardiac_index = "Cardiac Index",
+                       bmi = "BMI",
+                       sex = "Sex",
+                       race = "Race",
+                       requested_status = "Requested Status",
+                       blood_type = "Blood Type",
+                       functional = "Functional Status",
+                       payor = "Insurance Type",
+                       diagnosis = "Primary Diagnosis",
+                       pcwp = "Pulmonary Capillary Wedge Pressure",
+                       cardiac_index = "Cardiac Index",
+                       MCS = "Mechanical Circulatory Support",
+                       inotrope = "Intravenous Inotropes",
+                       FormStatus_descrip = "Status of Exception Form")
+labelled::var_label(fortable1) <- var_label_list
+
+
+fortable1 %>% ungroup() %>%
+  dplyr::select(
+    age_at_listing, sex, race, bmi, blood_type, diagnosis, requested_status, MCS, FormStatus_descrip) %>%
+  tbl_summary(by = FormStatus_descrip, digits = list(all_categorical() ~ c(0, 1))) %>%
+  add_p(test.args = all_tests("chisq.test") ~ list(workspace=2e7)) %>%
+  add_overall() %>% 
+  #remove_row_type(variables = c(pcwp, cardiac_index), type = "missing", level_value = ("(Missing)")) %>%
+  remove_row_type(variables = c(MCS), type = "missing", level_value = ("(Unknown)")) %>%
+  as_gt()
+
+
+justreceipts = total %>% filter(outcome == "Form Receipt by RRB")
+
+data_vector = justreceipts$time
+quantile(data_vector, probs = c(0.25, 0.5, 0.99))
+
+
+
+
+
+
+```
+
+
+``` {r sensitivity}
+
+#perform a sensitivity analysis in which we assume that the review date is 3 days after the receipt date.
+
+notapproved_sensitivity <- notapproved %>% slice(n()) %>% 
+  mutate(
+    FormReceiptDt = as.Date(FormReceiptDt),
+    extra_date = FormReceiptDt + 3,
+    tx = ifelse(REC_TX_DT >= FormEffectiveDt & REC_TX_DT <= extra_date, 1, 0),
+    death_det = case_when(
+      (CAN_REM_CD == 13 & CAN_REM_DT >= FormEffectiveDt & CAN_REM_DT <= extra_date) | 
+      (death_date >= FormEffectiveDt & death_date <= extra_date) ~ 1,
+      TRUE ~ 0),
+    review = ifelse(death_det == 0 & tx == 0 & CAN_REM_DT >= extra_date, 1, 0)) %>% 
+  arrange(tx) %>% slice(n()) %>% 
+  mutate(
+    outcome = case_when(
+      death_det == 1 ~ 1,
+      tx == 1 ~ 2,
+      review == 1 ~ 3,
+      TRUE ~ 0),
+    time_from_status_to_review = as.numeric(difftime(extra_date, FormEffectiveDt, units = "days")),
+    time_from_status_to_tx = ifelse(tx == 1, as.numeric(difftime(REC_TX_DT, FormEffectiveDt, units = "days")), NA),
+    time_from_status_to_death_det = ifelse(death_det == 1, as.numeric(difftime(CAN_REM_DT, FormEffectiveDt, units = "days")), NA),
+    time_from_status_to_removal = as.numeric(difftime(last_date, FormEffectiveDt, units = "days")),
+    time = case_when(
+      outcome == 1 ~ time_from_status_to_death_det,
+      outcome == 2 ~ time_from_status_to_tx,
+      outcome == 3 ~ time_from_status_to_review,
+      TRUE ~ time_from_status_to_removal))
+
+
+approved_sensitivity <- approved %>% slice(n()) %>% 
+  mutate(
+    FormReceiptDt = as.Date(FormReceiptDt),
+    extra_date = FormReceiptDt + 3,
+    tx = ifelse(REC_TX_DT >= FormEffectiveDt & REC_TX_DT <= extra_date, 1, 0),
+         death_det = case_when(
+           (CAN_REM_CD == 13 & CAN_REM_DT >= FormEffectiveDt & CAN_REM_DT <= extra_date) | 
+            (death_date >= FormEffectiveDt & death_date <= extra_date) ~ 1,
+           TRUE ~ 0),
+    review = ifelse(death_det == 0 & tx == 0 & CAN_REM_DT >= extra_date, 1, 0)) %>% 
+  arrange(tx) %>% slice(n()) %>% 
+  mutate(
+    outcome = case_when(
+      death_det == 1 ~ 1,
+      tx == 1 ~ 2,
+      review == 1 ~ 3,
+      TRUE ~ 0),
+    time_from_status_to_review = as.numeric(difftime(extra_date, FormEffectiveDt, units = "days")),
+    time_from_status_to_tx = ifelse(tx == 1, as.numeric(difftime(REC_TX_DT, FormEffectiveDt, units = "days")), NA),
+    time_from_status_to_death_det = ifelse(death_det == 1, as.numeric(difftime(CAN_REM_DT, FormEffectiveDt, units = "days")), NA),
+    time_from_status_to_removal = as.numeric(difftime(last_date, FormEffectiveDt, units = "days")),
+    time = case_when(
+      outcome == 1 ~ time_from_status_to_death_det,
+      outcome == 2 ~ time_from_status_to_tx,
+      outcome == 3 ~ time_from_status_to_review,
+      TRUE ~ time_from_status_to_removal))
+
+
+total_sensitivity <- rbind(notapproved_sensitivity, approved_sensitivity)
+
+totaltime_sensitivity <- sum(total_sensitivity$time_from_status_to_review)
+
+total_sensitivity$outcome <- factor(total_sensitivity$outcome,
+                                    levels = c("0", "1", "2", "3"), # Assuming 0 is censored, adjust if different
+                                    labels = c("Censored", "Death or Deterioration Before\nEstimated Form Review", 
+                                               "Transplant Before\nEstimated Form Review", "Estimated RRB Review"))
+
+options("ggsurvfit.switch-color-linetype" = TRUE)
+
+custom_colors <- c("black", "#FA9E4D", "#660000") 
+
+
+cif_plot_sensitivity <- survfit2(Surv(time, outcome) ~ FormStatus_descrip, data = total_sensitivity) %>%
+  ggcuminc(
+    outcome = c("Death or Deterioration Before\nEstimated Form Review", "Transplant Before\nEstimated Form Review", "Estimated RRB Review"),
+    linewidth = 1) + 
+  add_confidence_interval(alpha = 0.5) +
+  add_risktable(size = 7, theme = theme_risktable_default(plot.title.size = 18, axis.text.y.size = 18)) +
+  coord_cartesian(xlim = c(0, 14)) +
+  scale_x_continuous(breaks = c(0, 2, 4, 6, 8, 10, 12, 14)) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent, 
+    expand = c(0.01, 0)
+  ) +
+  xlab("Days after Submitting Status Exception Application") +
+  theme_classic() +
+  #guides(linetype=guide_legend(nrow = 1, byrow=TRUE)) +
+  #guides(color = guide_legend(nrow = 1, byrow=TRUE)) +
+  scale_color_manual(values = c('#374e55', '#df8f44', '#00a1d5')) +
+  scale_fill_manual(values = c('#374e55', '#df8f44', '#00a1d5')) +
+  guides(linetype = "none") +
+  theme(plot.title = element_text(size = 18),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20)) +
+  annotate("text", x = 0, y = 0.95, hjust = 0, size = 6,
+           label = paste0(
+             "Death/Deterioration p: ", "0.24")) + 
+  annotate("text", x = 0, y = 0.88, hjust = 0, size = 6,
+           label = paste0(
+             "Transplant p: ", "< 0.001")) + 
+  annotate("text", x = 0, y = 0.81, hjust = 0, size = 6,
+           label = paste0(
+             "Estimated RRB Review p: ", "< 0.001"))
+
+
+
+cifresults_sensitivity <- cuminc(Surv(time, outcome) ~ FormStatus_descrip, data = total_sensitivity)
+
+print(cifresults_sensitivity)
+
+cifresults_review <- cuminc(Surv(time, outcome) ~ FormStatus_descrip, data = as.data.frame(total_sensitivity)) %>%
+  tbl_cuminc(
+    times = 14,
+    outcomes = c("Death or Deterioration Before\nEstimated Form Review", "Transplant Before\nEstimated Form Review", "Estimated RRB Review"),
+    estimate_fun = gtsummary::label_style_number(scale = 100, digits = 1))
+
+
+cif_plots_combined <- plot_grid(cif_plot, cif_plot_sensitivity, ncol = 1, nrow = 2, labels = c("A", "B"), label_size = 20)
+
+
+
+
+```
+
+
+
+
+``` {r transplants among denied candidates}
+#isolate the patients who received a transplant with exceptions that were ultimately denied
+
+exception_after_listing <- notapproved_dataset %>% filter(tx == 1) %>% left_join(cand_thor24 %>% select(PX_ID, CAN_LISTING_DT)) %>%
+  left_join(stathist_thor24 %>% select(PX_ID, CANHX_BEGIN_DT, CANHX_END_DT, CANHX_STAT_CD), by = "PX_ID") %>% 
+  filter(all(CAN_LISTING_DT != FormEffectiveDt))
+
+prev_status <- exception_after_listing %>%
+  mutate(
+    indexofexception = which(FormEffectiveDt >= CANHX_BEGIN_DT & FormEffectiveDt <= CANHX_END_DT) [1]) %>%
+  mutate(
+    index = indexofexception - 1,
+    status_before_exception = case_when(
+      CANHX_STAT_CD == 2110 ~ "1",
+      CANHX_STAT_CD == 2120 ~ "2",
+      CANHX_STAT_CD == 2130 ~ "3",
+      CANHX_STAT_CD == 2140 ~ "4",
+      CANHX_STAT_CD == 2150 ~ "5",
+      CANHX_STAT_CD == 2160 ~ "6",
+      CANHX_STAT_CD == 2999 ~ "Inactive")) %>% filter(row_number() == index) %>% 
+  select(PX_ID, status_before_exception) %>% filter(status_before_exception != "Inactive")
+
+
+denied_exception_tx <- notapproved_dataset %>% filter(tx == 1) %>% left_join(prev_status) %>%
+  left_join(stathist_thor24 %>% select(PX_ID, CANHX_BEGIN_DT, CANHX_END_DT, CANHX_STAT_CD), by = "PX_ID") %>% arrange(CANHX_BEGIN_DT) %>% slice(n()) %>%
+  mutate(
+    actual_status = case_when(
+      CANHX_STAT_CD == 2110 ~ "1",
+      CANHX_STAT_CD == 2120 ~ "2",
+      CANHX_STAT_CD == 2130 ~ "3",
+      CANHX_STAT_CD == 2140 ~ "4",
+      CANHX_STAT_CD == 2150 ~ "5",
+      CANHX_STAT_CD == 2160 ~ "6")) %>% left_join(cand_thor24 %>% select(PX_ID, DONOR_ID))
+
+no_status_before_exception <- denied_exception_tx %>% filter(is.na(status_before_exception))
+
+thor_support_device = ThorSupportDevice %>%
+  mutate(ChangeDt = as.Date(ChangeDate)) %>%
+  left_join(just_form_hr %>% select(ThorSupportDevicePrimary, PX_ID),
+            by = c("DeviceId" = "ThorSupportDevicePrimary")) %>%
+  select(-DeviceId) %>%
+  distinct(.keep_all = TRUE)
+
+no_status_before_exception <- no_status_before_exception %>% 
+  left_join(cand_thor24 %>% select(PX_ID, CAN_LISTING_DT, CAN_IABP, CAN_ECMO, DONOR_ID, CAN_DGN, CAN_VAD1, CAN_VAD2, CAN_VAD_TAH, CAN_VAD_TY, CAN_PREV_HR), by = "PX_ID") %>%
+  mutate(
+    diagnosis = case_when(
+      CAN_DGN > 1048 & CAN_DGN < 1100 ~ "Restrictive Cardiomyopathy",
+      CAN_DGN == 1201 ~ "Hypertrophic Cardiomyopathy",
+      CAN_DGN == 1203 | (CAN_DGN >= 1205 & CAN_DGN <= 1207) ~ "Congenital Heart Disease",
+      TRUE ~ "Other")) %>% left_join(thor_support_device %>% select(PX_ID, VadBrandId, TahBrandId, PercuBrandId, OtherSpecify, ImplantDt)) %>% ungroup() %>% group_by(PX_ID) %>% arrange(ImplantDt) %>% slice(1) 
+  
+#use OPTN policy to determine what status patients would have had
+labdata <- risk_strat_data_hr %>% select(PX_ID, ChangeDt, CurrTherVasoactiveSupport, CurrTherDopamine, CurrTherDobutamine, CurrTherMilrinone, CurrTherEpinephrine, CurrTherNorephinephrine, CurrTherVasopressin, CurrTherPulVas, starts_with("Hemo")) %>%
+  mutate(
+    high_dose_inotrope = case_when(
+      CurrTherDobutamine >= 7.5 | CurrTherMilrinone >= 0.5 | CurrTherEpinephrine >= 0.02 ~ 1,
+      TRUE ~ 0),
+    multi_agent_low_dose_inotropes = case_when(
+      high_dose_inotrope != 1 & ((CurrTherDobutamine >= 3 & CurrTherMilrinone >= 0.25) | (CurrTherDobutamine >= 3 & CurrTherEpinephrine >= 0.01) | (CurrTherDobutamine >= 3 & CurrTherDopamine >= 3) | (CurrTherMilrinone >= 0.25 & CurrTherEpinephrine >= 0.01) | (CurrTherMilrinone >= 0.25 & CurrTherDopamine >= 3) | (CurrTherEpinephrine >= 0.01 & CurrTherDopamine >= 3)) ~ 1,
+      TRUE ~ 0),
+    status3inotropes = ifelse(high_dose_inotrope == 1 | multi_agent_low_dose_inotropes == 1, 1, 0),
+    status4inotropes = ifelse(CurrTherDobutamine >= 3 | CurrTherMilrinone >= 0.25 | CurrTherEpinephrine >= 0.01 | CurrTherDopamine >= 3, 1, 0),
+    status4inotropes = ifelse(is.na(status4inotropes), 0, status4inotropes)) %>%
+  select(-starts_with("CurrTher"))
+
+#Here we estimated what statuses the 115 candidates with denied exceptions who received transplants should have had if they didn't have those exceptions. We used hemodynamic and other MCS data from the status justification files.
+
+predicted_statuses <- no_status_before_exception %>% left_join(labdata) %>% 
+  select(PX_ID, REC_TX_DT, CAN_LISTING_DT, FormEffectiveDt, ChangeDt, diagnosis, CAN_IABP, CAN_ECMO, PercuBrandId, VadBrandId, TahBrandId, OtherSpecify, ImplantDt, starts_with("Hemo"), status3inotropes, status4inotropes, CAN_PREV_HR) %>%
+  mutate(time_before_tx = as.numeric(difftime(FormEffectiveDt, ChangeDt, units = "days")),
+         time_from_listing = as.numeric(difftime(FormEffectiveDt, CAN_LISTING_DT, units = "days"))) %>% group_by(PX_ID) %>%
+  mutate(index = ifelse(any(time_before_tx <= 7), 1, 0),
+         PEVAD = ifelse(OtherSpecify == "Impella 5.5", 1, 0),
+         PEVAD = ifelse(is.na(PEVAD), 0, PEVAD),
+         dLVAD = ifelse(PercuBrandId == 239 | VadBrandId == 236, 1, 0),
+         dLVAD = ifelse(is.na(dLVAD), 0, dLVAD),
+         ImplantDt = ifelse(PEVAD == 1 | dLVAD == 1, ymd(ImplantDt), NA),
+         ImplantDt = as.Date(ImplantDt)) %>%
+  select(-PercuBrandId, -VadBrandId, -TahBrandId, -OtherSpecify, -HemoDbp, -HemoRestingHeartRate, -HemoPasp, -HemoPadp, -HemoMeanPressure, -HemoPcwpOrLvedp, -HemoLvedp, -HemoCardiacOutput, -HemoHemoglobin) %>%
+  mutate(
+    predicted_status = case_when(
+      CAN_ECMO == 1 ~ 1,
+      CAN_IABP == 1 & HemoPcwp > 15 & HemoSbp < 90 & HemoCardiacIndex < 2 & grepl("Inotrope", HemoObtainedOnSupport) & as.numeric(difftime(CAN_LISTING_DT, HemoDt, units = "days")) <= 7 & as.numeric(difftime(CAN_LISTING_DT, HemoDt, units = "days")) >= 0 ~ 2,
+      CAN_IABP == 1 & HemoPcwp > 15 & HemoSbp < 90 & HemoCardiacIndex < 1.8 & !grepl("Inotrope", HemoObtainedOnSupport) & as.numeric(difftime(CAN_LISTING_DT, HemoDt, units = "days")) <= 7 & as.numeric(difftime(CAN_LISTING_DT, HemoDt, units = "days")) >= 0 ~ 2,
+      PEVAD == 1 & HemoPcwp > 15 & HemoSbp < 90 & HemoCardiacIndex < 2 & grepl("Inotrope", HemoObtainedOnSupport) & as.numeric(difftime(ImplantDt, HemoDt, units = "days")) <= 7 & as.numeric(difftime(ImplantDt, HemoDt, units = "days")) >= 0 ~ 2,
+      PEVAD == 1 & HemoPcwp > 15 & HemoSbp < 90 & HemoCardiacIndex < 1.8 & !grepl("Inotrope", HemoObtainedOnSupport) & as.numeric(difftime(ImplantDt, HemoDt, units = "days")) <= 7 & as.numeric(difftime(ImplantDt, HemoDt, units = "days")) >= 0 ~ 2,
+      status3inotropes == 1 & HemoDataObtained == "Invasive Pulmonary Artery Catheter" & as.numeric(difftime(FormEffectiveDt, HemoDt, units = "days")) <= 7 ~ 3,
+      (status4inotropes == 1 & as.numeric(difftime(FormEffectiveDt, HemoDt, units = "days")) <= 7) | diagnosis != "Other" | dLVAD == 1 | CAN_PREV_HR == 1 ~ 4,
+      TRUE ~ 6)) %>% filter(time_before_tx >= 0) %>% group_by(PX_ID) %>% arrange(predicted_status) %>% slice(1) %>% select(PX_ID, predicted_status)
+
+denied_exception_tx <- denied_exception_tx %>% left_join(predicted_statuses) %>%
+  mutate(
+    status_before_exception = as.numeric(status_before_exception),
+    predicted_status_without_exception = case_when(
+      !is.na(status_before_exception) ~ status_before_exception,
+      TRUE ~ predicted_status)) %>%
+  select(PX_ID, DONOR_ID, REC_TX_DT, FormEffectiveDt, actual_status, predicted_status_without_exception)
+      
+write.csv(denied_exception_tx, "HTx_Rec_Before_Exception_Review.csv")
+
+
+custom_colors <- c(
+  `dark red` = "#660000",
+  `bright red` = "#b81d2e",
+  `orange` = "#ae6320",
+  `yellow`= "#b8a370",
+  `green` = "#3ba9a9",
+  `white` = "#FFFFFF",
+  `grey` = "#C3C1C1",
+  `light green` = "#8dd9d7",
+  `light yellow` = "#ddd3bb",
+  `light orange` = "#e49f62",
+  `space sparkle`= "#496061",
+  `violet` = "#7A3DE3",
+  `sandy brown` = "#FA9E4D")
+
+custom_colors <- c("#660000", "#ae6320", "#b8a370", "#C3C1C1") 
+
+plot_actual_status <- ggplot(denied_exception_tx, aes(x = factor(actual_status))) +
+  geom_bar(stat = "count", fill = "skyblue", color = "black") +
+  labs(title = "",
+       x = "Actual Status at Transplant",
+       y = "Number of Patients") +
+  scale_x_discrete(limits = c("1", "2", "3", "4", "5", "6")) +  # Specify the labels
+  theme_classic() +
+  theme(plot.title = element_text(size = 18),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+# Part B: Histogram of the number of patients by their predicted status without exception
+# Stratified by actual status
+plot_predicted_status <- ggplot(denied_exception_tx, aes(x = factor(predicted_status_without_exception), fill = factor(actual_status))) +
+  geom_bar(stat = "count", position = "stack", color = "black") +
+  labs(title = "",
+       x = "Predicted Status at Transplant without Exception",
+       y = "Number of Patients",
+       fill = "Actual Status") +
+  scale_x_discrete(limits = c("1", "2", "3", "4", "5", "6")) +
+  theme_classic() +
+  scale_fill_manual(values = custom_colors) +
+  theme(plot.title = element_text(size = 18),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20),
+        legend.position = "bottom")
+
+figure_for_denied_transplants <- plot_grid(plot_actual_status, plot_predicted_status, ncol = 1, nrow = 2, labels = c("A", "B"), label_size = 18)
+
+
+```
+
+
+``` {r match runif}
+
+#use match run data to determine what classification patients with denials should have been at the time of transplant.
+
+data_for_match_run <- denied_exception_tx %>% left_join(tx_hr24 %>% select(PX_ID, REC_TX_ORG_TY, DON_AGE)) %>% ungroup()
+
+donor_ids <- data_for_match_run$DONOR_ID
+recipient_ids <- data_for_match_run$PX_ID
+
+match_run_2018 <- ptr_hr_20180101_20181231_pub %>% select(MATCH_ID, MATCH_SUBMIT_DT, MATCH_ORG, DONOR_ID, PX_ID, PTR_ROW_ORDER, PTR_SEQUENCE_NUM, PTR_CLASS_ALLOC_CAT, PTR_STAT_CD, PTR_DISTANCE, PTR_OFFER_ACPT) %>% filter(DONOR_ID %in% c(donor_ids)) %>% left_join(data_for_match_run %>% select(DONOR_ID, DON_AGE)) %>% group_by(DONOR_ID, MATCH_ID) %>% filter(any(PX_ID %in% c(recipient_ids))) %>% arrange(PTR_SEQUENCE_NUM)
+
+match_run_2019 <- ptr_hr_20190101_20191231_pub %>% select(MATCH_ID, MATCH_SUBMIT_DT, MATCH_ORG, DONOR_ID, PX_ID, PTR_ROW_ORDER, PTR_SEQUENCE_NUM, PTR_CLASS_ALLOC_CAT, PTR_STAT_CD, PTR_DISTANCE, PTR_OFFER_ACPT) %>% filter(DONOR_ID %in% c(donor_ids)) %>% left_join(data_for_match_run %>% select(DONOR_ID, DON_AGE)) %>% group_by(DONOR_ID, MATCH_ID) %>% filter(any(PX_ID %in% c(recipient_ids))) %>% arrange(PTR_SEQUENCE_NUM) 
+
+match_run_2020 <- ptr_hr_20200101_20201231_pub %>% select(MATCH_ID, MATCH_SUBMIT_DT, MATCH_ORG, DONOR_ID, PX_ID, PTR_ROW_ORDER, PTR_SEQUENCE_NUM, PTR_CLASS_ALLOC_CAT, PTR_STAT_CD, PTR_DISTANCE, PTR_OFFER_ACPT) %>% filter(DONOR_ID %in% c(donor_ids)) %>% left_join(data_for_match_run %>% select(DONOR_ID, DON_AGE)) %>% group_by(DONOR_ID, MATCH_ID) %>% filter(any(PX_ID %in% c(recipient_ids))) %>% arrange(PTR_SEQUENCE_NUM) 
+
+match_run_2021 <- ptr_hr_20210101_20211231_pub %>% select(MATCH_ID, MATCH_SUBMIT_DT, MATCH_ORG, DONOR_ID, PX_ID, PTR_ROW_ORDER, PTR_SEQUENCE_NUM, PTR_CLASS_ALLOC_CAT, PTR_STAT_CD, PTR_DISTANCE, PTR_OFFER_ACPT) %>% filter(DONOR_ID %in% c(donor_ids)) %>% left_join(data_for_match_run %>% select(DONOR_ID, DON_AGE)) %>% group_by(DONOR_ID, MATCH_ID) %>% filter(any(PX_ID %in% c(recipient_ids))) %>% arrange(PTR_SEQUENCE_NUM) 
+
+match_run_2022 <- ptr_hr_20220101_20221231_pub %>% select(MATCH_ID, MATCH_SUBMIT_DT, MATCH_ORG, DONOR_ID, PX_ID, PTR_ROW_ORDER, PTR_SEQUENCE_NUM, PTR_CLASS_ALLOC_CAT, PTR_STAT_CD, PTR_DISTANCE, PTR_OFFER_ACPT) %>% filter(DONOR_ID %in% c(donor_ids)) %>% left_join(data_for_match_run %>% select(DONOR_ID, DON_AGE)) %>% group_by(DONOR_ID, MATCH_ID) %>% filter(any(PX_ID %in% c(recipient_ids))) %>% arrange(PTR_SEQUENCE_NUM) 
+
+match_run_2023 <- ptr_hr_20230101_20231231_pub %>% select(MATCH_ID, MATCH_SUBMIT_DT, MATCH_ORG, DONOR_ID, PX_ID, PTR_ROW_ORDER, PTR_SEQUENCE_NUM, PTR_CLASS_ALLOC_CAT, PTR_STAT_CD, PTR_DISTANCE, PTR_OFFER_ACPT) %>% filter(DONOR_ID %in% c(donor_ids)) %>% left_join(data_for_match_run %>% select(DONOR_ID, DON_AGE)) %>% group_by(DONOR_ID, MATCH_ID) %>% filter(any(PX_ID %in% c(recipient_ids))) %>% arrange(PTR_SEQUENCE_NUM) 
+
+match_run_2024 <- ptr_hr_20240101_20241231_pub %>% select(MATCH_ID, MATCH_SUBMIT_DT, MATCH_ORG, DONOR_ID, PX_ID, PTR_ROW_ORDER, PTR_SEQUENCE_NUM, PTR_CLASS_ALLOC_CAT, PTR_STAT_CD, PTR_DISTANCE, PTR_OFFER_ACPT) %>% filter(DONOR_ID %in% c(donor_ids)) %>% left_join(data_for_match_run %>% select(DONOR_ID, DON_AGE)) %>% group_by(DONOR_ID, MATCH_ID) %>% filter(any(PX_ID %in% c(recipient_ids))) %>% arrange(PTR_SEQUENCE_NUM) 
+
+full_match_runs <- rbind(match_run_2018, match_run_2019, match_run_2020, match_run_2021, match_run_2022, match_run_2023, match_run_2024)
+
+data_for_match <- full_match_runs %>% select(-PTR_ROW_ORDER, -PTR_SEQUENCE_NUM, -PTR_STAT_CD) %>% ungroup() %>% filter(PX_ID %in% c(recipient_ids) & DONOR_ID %in% c(donor_ids)) %>% left_join(data_for_match_run %>% select(PX_ID, REC_TX_DT, actual_status, predicted_status_without_exception)) %>% 
+  left_join(cand_thor24 %>% select(PX_ID, CAN_ABO), by = "PX_ID") %>% 
+  left_join(donor_deceased %>% select(DONOR_ID, DON_ABO), by = "DONOR_ID") %>%
+  mutate(
+    class = PTR_CLASS_ALLOC_CAT,
+    can_blood_type = factor(
+      case_when(
+        CAN_ABO %in% c("A", "A1", "A2") ~ "A",
+        CAN_ABO %in% c("A1B", "A2B") ~ "AB",
+        TRUE ~ CAN_ABO)),
+    don_blood_type = factor(
+      case_when(
+        DON_ABO %in% c("A", "A1", "A2") ~ "A",
+        DON_ABO %in% c("A1B", "A2B") ~ "AB",
+        TRUE ~ DON_ABO)),
+    BLOOD = case_when(
+      don_blood_type == "O" & (can_blood_type == "A" | can_blood_type == "AB") ~ 1,
+      TRUE ~ 0),
+    ADULT_DONOR_CLASSIFICATION = case_when(
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 1 & PTR_DISTANCE <= 500 ~ 1,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 1 & PTR_DISTANCE <= 500 ~ 2,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 2 & PTR_DISTANCE <= 500 ~ 3,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 2 & PTR_DISTANCE <= 500 ~ 4,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 3 & PTR_DISTANCE <= 250 ~ 5,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 3 & PTR_DISTANCE <= 250 ~ 6,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 1 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 7,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 1 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 8,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 2 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 9,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 2 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 10,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 4 & PTR_DISTANCE <= 250 ~ 11,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 4 & PTR_DISTANCE <= 250 ~ 12,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 3 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 13,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 3 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 14,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 5 & PTR_DISTANCE <= 250 ~ 15,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 5 & PTR_DISTANCE <= 250 ~ 16,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 3 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 17,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 3 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 18,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 6 & PTR_DISTANCE <= 250 ~ 19,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 6 & PTR_DISTANCE <= 250 ~ 20,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 1 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 21,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 1 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 22,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 2 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 23,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 2 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 24,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 3 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 25,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 3 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 26,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 4 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 27,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 4 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 28,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 5 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 29,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 5 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 30,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 6 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 31,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 6 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 32,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 1 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 33,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 1 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 34,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 2 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 35,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 2 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 36,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 3 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 37,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 3 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 38,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 4 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 39,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 4 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 40,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 5 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 41,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 5 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 42,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 6 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 43,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 6 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 44,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 1 & PTR_DISTANCE > 2500 ~ 45,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 1 & PTR_DISTANCE > 2500 ~ 46,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 2 & PTR_DISTANCE > 2500 ~ 47,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 2 & PTR_DISTANCE > 2500 ~ 48,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 3 & PTR_DISTANCE > 2500 ~ 49,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 3 & PTR_DISTANCE > 2500 ~ 50,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 4 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 51,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 4 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 52,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 5 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 53,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 5 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 54,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 6 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 55,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 6 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 56,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 4 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 57,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 4 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 58,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 5 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 59,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 5 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 60,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 6 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 61,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 6 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 62,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 4 & PTR_DISTANCE > 2500 ~ 63,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 4 & PTR_DISTANCE > 2500 ~ 64,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 5 & PTR_DISTANCE > 2500 ~ 65,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 5 & PTR_DISTANCE > 2500 ~ 66,
+      DON_AGE >= 18 & BLOOD == 0 & predicted_status_without_exception == 6 & PTR_DISTANCE > 2500 ~ 67,
+      DON_AGE >= 18 & BLOOD == 1 & predicted_status_without_exception == 6 & PTR_DISTANCE > 2500 ~ 68,
+      TRUE ~ NA),
+    PEDIATRIC_DONOR_CLASSIFICATION = case_when(
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 1 & PTR_DISTANCE <= 250 ~ 3,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 1 & PTR_DISTANCE <= 250 ~ 4,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 2 & PTR_DISTANCE <= 250 ~ 5,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 2 & PTR_DISTANCE <= 250 ~ 6,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 1 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 9,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 1 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 10,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 2 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 11,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 2 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 12,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 3 & PTR_DISTANCE <= 250 ~ 13,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 3 & PTR_DISTANCE <= 250 ~ 14,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 4 & PTR_DISTANCE <= 250 ~ 15,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 4 & PTR_DISTANCE <= 250 ~ 16,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 5 & PTR_DISTANCE <= 250 ~ 17,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 5 & PTR_DISTANCE <= 250 ~ 18,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 3 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 19,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 3 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 20,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 4 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 21,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 4 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 22,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 5 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 23,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 5 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 24,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 6 & PTR_DISTANCE <= 250 ~ 27,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 6 & PTR_DISTANCE <= 250 ~ 28,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 1 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 31,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 1 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 32,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 2 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 33,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 2 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 34,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 3 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 37,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 3 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 38,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 4 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 39,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 4 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 40,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 5 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 41,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 5 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 42,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 6 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 45,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 6 & PTR_DISTANCE > 250 & PTR_DISTANCE <= 500 ~ 46,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 6 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 49,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 6 & PTR_DISTANCE > 500 & PTR_DISTANCE <= 1000 ~ 50,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 1 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 53,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 1 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 54,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 2 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 55,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 2 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 56,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 3 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 59,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 3 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 60,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 4 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 61,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 4 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 62,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 5 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 63,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 5 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 64,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 6 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 67,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 6 & PTR_DISTANCE > 1000 & PTR_DISTANCE <= 1500 ~ 68,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 1 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 71,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 1 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 72,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 2 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 73,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 2 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 74,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 3 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 77,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 3 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 78,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 4 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 79,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 4 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 80,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 5 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 81,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 5 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 82,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 6 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 85,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 6 & PTR_DISTANCE > 1500 & PTR_DISTANCE <= 2500 ~ 86,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 1 & PTR_DISTANCE > 2500 ~ 89,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 1 & PTR_DISTANCE > 2500 ~ 90,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 2 & PTR_DISTANCE > 2500 ~ 91,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 2 & PTR_DISTANCE > 2500 ~ 92,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 3 & PTR_DISTANCE > 2500 ~ 95,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 3 & PTR_DISTANCE > 2500 ~ 96,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 4 & PTR_DISTANCE > 2500 ~ 97,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 4 & PTR_DISTANCE > 2500 ~ 98,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 5 & PTR_DISTANCE > 2500 ~ 99,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 5 & PTR_DISTANCE > 2500 ~ 100,
+      DON_AGE < 18 & BLOOD == 0 & predicted_status_without_exception == 6 & PTR_DISTANCE > 2500 ~ 103,
+      DON_AGE < 18 & BLOOD == 1 & predicted_status_without_exception == 6 & PTR_DISTANCE > 2500 ~ 104,
+      TRUE ~ NA))
+
+data_for_match$class = substr(data_for_match$class, 1, nchar(data_for_match$class) - 4)
+data_for_match$class = as.double(data_for_match$class)
+
+data_for_match = data_for_match %>% 
+  mutate(
+    class = class / 100) %>% left_join(data_for_match_run %>% select(DONOR_ID, PX_ID), by = "DONOR_ID") %>% filter(PX_ID.x == PX_ID.y) %>%
+  ungroup() %>% group_by(DONOR_ID) %>% arrange(MATCH_SUBMIT_DT) %>% 
+  #filter(DONOR_ID == 575244) %>%
+  mutate(
+    last_Y_position = ifelse(row_number() == max(row_number()[PTR_OFFER_ACPT == "Y"]), row_number(), NA)) %>%
+  fill(last_Y_position, .direction = "downup") %>%
+  mutate(
+    predicted_class = ifelse(!is.na(ADULT_DONOR_CLASSIFICATION), ADULT_DONOR_CLASSIFICATION, PEDIATRIC_DONOR_CLASSIFICATION)) %>% 
+  filter(row_number() == last_Y_position) %>% select(-PX_ID.y, -can_blood_type, -don_blood_type, -last_Y_position, -CAN_ABO, -DON_ABO) %>%
+  rename(PX_ID = PX_ID.x) %>% ungroup()
+
+match_ids <- data_for_match$MATCH_ID
+
+revised_match_runs = full_match_runs %>% left_join(data_for_match %>% select(MATCH_ID, PX_ID, predicted_class), by = "MATCH_ID") %>% 
+  filter(MATCH_ID %in% c(match_ids)) %>% group_by(MATCH_ID) %>% mutate(match_class = PTR_CLASS_ALLOC_CAT)
+
+revised_match_runs$match_class = substr(revised_match_runs$match_class, 1, nchar(revised_match_runs$match_class) - 4)
+revised_match_runs$match_class = as.double(revised_match_runs$match_class)
+
+number_observations_per_match = revised_match_runs %>% summarize(number_observations = n())
+
+revised_match_runs <- data.frame(revised_match_runs)
+
+revised_match_runs = revised_match_runs %>% left_join(number_observations_per_match) %>% group_by(MATCH_ID) %>%
+  mutate(
+    match_class = match_class / 100) %>% arrange(match_class) %>%
+  mutate(
+    index_of_patient_in_match = which(PX_ID.x == PX_ID.y) [1])
+
+revised_match_runs = revised_match_runs %>% mutate(next_match_class = lead(match_class)) %>%
+  mutate(
+    is_predicted_status_present = case_when(
+      any(predicted_class == match_class) ~ 1,
+      all(predicted_class != match_class) & predicted_class > last(match_class) ~ 2,
+      all(predicted_class != match_class) & any(predicted_class > match_class & predicted_class < lead(match_class)) ~ 3,
+      TRUE ~ 4),
+    index_of_predicted_status = case_when(
+      is_predicted_status_present == 1 ~ which(predicted_class == match_class) [1],
+      is_predicted_status_present == 2 ~ number_observations,
+      is_predicted_status_present == 3 ~ which(predicted_class > match_class & predicted_class < next_match_class) [1])) %>%
+  filter(row_number() > index_of_patient_in_match & row_number() < index_of_predicted_status)
+
+#A total of 7,381 people could have been offered the heart that eventually went to these 115 people. 
+
+skipped_candidates = revised_match_runs %>% ungroup() %>% select(PX_ID.x, MATCH_SUBMIT_DT) %>% rename(PX_ID = PX_ID.x) %>% 
+  mutate(MATCH_SUBMIT_DT = floor_date(MATCH_SUBMIT_DT, unit = "day")) %>% 
+  left_join(cand_thor24 %>% select(PX_ID, CAN_LISTING_DT, CAN_REM_DT, CAN_REM_CD, CAN_LAST_ACT_STAT_DT)) %>%
+  mutate(
+    OUTCOME = case_when(
+      CAN_REM_CD == 4 ~ 1,
+      CAN_REM_CD == 8 | CAN_REM_CD == 13 ~ 2,
+      TRUE ~ 0),
+    TIME = case_when(
+      OUTCOME == 1 ~ as.numeric(difftime(CAN_REM_DT, MATCH_SUBMIT_DT, units = "days")),
+      OUTCOME == 2 ~ as.numeric(difftime(CAN_REM_DT, MATCH_SUBMIT_DT, units = "days")),
+      TRUE ~ as.numeric(difftime(CAN_LAST_ACT_STAT_DT, MATCH_SUBMIT_DT, units = "days")))) %>% filter(TIME >= 0)
+  
+  
+
+skipped_candidates$OUTCOME <- factor(skipped_candidates$OUTCOME, 
+                                     levels = c(0, 1, 2),
+                                     labels = c("Censored", "Transplant", "Death or Deterioration"))
+
+options("ggsurvfit.switch-color-linetype" = FALSE)
+
+custom_colors <- c("black", "#FA9E4D", "#660000") 
+
+#perform CIF of patients within 6 weeks who were skipped in the match run
+
+cif_plot_skipped <- survfit2(Surv(TIME, OUTCOME) ~ 1, data = skipped_candidates) %>%
+  ggcuminc(
+    outcome = c("Death or Deterioration", "Transplant"),
+    linewidth = 1) + 
+  add_confidence_interval(alpha = 0.5) +
+  add_risktable(size = 7, theme = theme_risktable_default(plot.title.size = 18, axis.text.y.size = 18)) +
+  coord_cartesian(xlim = c(0, 42)) +
+  scale_x_continuous(breaks = c(0, 7, 14, 21, 28, 35, 42)) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent, 
+    expand = c(0.01, 0)
+  ) +
+  xlab("Days after Initial Match Run") +
+  theme_classic() +
+  #guides(linetype=guide_legend(nrow = 1, byrow=TRUE)) +
+  #guides(color = guide_legend(nrow = 1, byrow=TRUE)) +
+  scale_color_manual(values = c('black', 'darkred')) +
+  scale_fill_manual(values = c('#54738E', '#82AC7C')) +
+  theme(plot.title = element_text(size = 18),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20))
+
+
+cifresults_skipped <- cuminc(Surv(TIME, OUTCOME) ~ 1, data = as.data.frame(skipped_candidates)) %>%
+  tbl_cuminc(
+    times = 42,
+    outcomes = c("Transplant", "Death or Deterioration"),
+    estimate_fun = gtsummary::label_style_number(scale = 100, digits = 1))
+
+outcome_before_6weeks <- skipped_candidates %>% filter(TIME <= 42)
+table(outcome_before_6weeks$OUTCOME)
+
+```
+
